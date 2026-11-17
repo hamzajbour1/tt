@@ -1,104 +1,115 @@
--- nova_probe3.lua — فحص delegate الأصلي + NetUtil (جسر الشبكة→Lua) + تحميل الوحدات
+-- nova_probe4.lua — إيجاد موزّع الشبكة→Lua + أدوات + إبقاء مستمع GM
 local GENV = _ENV
-local OUT = "/sdcard/Android/data/com.tencent.ig/files/nova_probe3.txt"
+local OUT = "/sdcard/Android/data/com.tencent.ig/files/nova_probe4.txt"
 local L={}
 local function W(s) s=tostring(s); L[#L+1]=s
-  pcall(function() print("[NOVA3] "..s) end)
-  pcall(function() if slua and slua.HamzaCallback then slua.HamzaCallback("[NOVA3] "..s) end end) end
+  pcall(function() print("[NOVA4] "..s) end)
+  pcall(function() if slua and slua.HamzaCallback then slua.HamzaCallback("[NOVA4] "..s) end end) end
 local function flush() pcall(function() local f=io.open(OUT,"w"); if f then f:write(table.concat(L,"\n").."\n"); f:close() end end) end
-local function T(n,fn) local ok,r=pcall(fn); W(string.format("%-36s : %s",n,ok and tostring(r) or ("ERR "..tostring(r)))); return ok and r or nil end
-local function methods(ud, names)
-  for _,m in ipairs(names) do
-    T("  ."..m, function() return type(ud[m]) end)
-  end
-end
+local function T(n,fn) local ok,r=pcall(fn); W(string.format("%-34s : %s",n,ok and tostring(r) or ("ERR "..tostring(r)))); return ok and r or nil end
 
-W("========= NOVA PROBE 3 =========")
+W("========= NOVA PROBE 4 =========")
 
--- [1] delegate OnCloudGMReceive على slua_GameFrontendHUD
-W("---- [1] OnCloudGMReceive delegate ----")
-local hud = GENV.slua_GameFrontendHUD or GENV.GameFrontendHUD
-T("hud userdata", function() return type(hud) end)
-local dg = T("hud.OnCloudGMReceive", function() return hud and hud.OnCloudGMReceive end)
-if dg then
-  W("  delegate methods:")
-  methods(dg, {"Add","Remove","Clear","Broadcast","Contains","Clone"})
-  -- أضف مستمعنا لرصد أوامر GM من المصدر الأصلي
-  T("  Add our listener", function()
-    dg:Add(function(cmd)
-      pcall(function()
-        local f=io.open("/sdcard/Android/data/com.tencent.ig/files/nova_gm_log.txt","a")
-        if f then f:write(os.time().." NATIVE_GM="..tostring(cmd).."\n"); f:close() end
-        if slua and slua.HamzaCallback then slua.HamzaCallback("[NOVA3][NATIVE_GM] "..tostring(cmd):sub(1,200)) end
-      end)
+-- [1] أعد تثبيت مستمع GM (في حال أُعيد تحميل السكربت)
+W("---- [1] GM listener ----")
+T("re-add GM listener", function()
+  local hud = GENV.slua_GameFrontendHUD or GENV.GameFrontendHUD
+  local dg = hud and hud.OnCloudGMReceive
+  if not dg then return "no delegate" end
+  dg:Add(function(cmd)
+    pcall(function()
+      local f=io.open("/sdcard/Android/data/com.tencent.ig/files/nova_gm_log.txt","a")
+      if f then f:write(os.time().." GM="..tostring(cmd).."\n"); f:close() end
     end)
-    return "listener added"
   end)
-  -- جرّب Broadcast لمحاكاة أمر GM (يثبت المسار كله)
-  T("  TRY Broadcast(test)", function()
-    if type(dg.Broadcast)~="function" then return "no Broadcast" end
-    dg:Broadcast("NOVA_TEST_GM_CMD")
-    return "broadcast sent (check nova_gm_log + status)"
-  end)
-end
+  return "listener (re)added"
+end)
 
--- [2] NetUtil — جسر الشبكة→Lua (الأهم)
-W("---- [2] NetUtil ----")
-local net = GENV.NetUtil
-T("NetUtil type", function() return type(net) end)
-if net then
-  W("  NetUtil methods:")
-  methods(net, {"s2c","c2s","unreg_s2c","unreg_c2s","SendPkg","SendTime",
-                "reg","register","RegisterS2C","AddHandler","dispatch",
-                "Send","Recv","OnRecv","RegisterProtocol","BindProtocol"})
-  -- حاول تعداد الحقول إن كانت table أو لها __pairs
-  T("  is table", function() return type(net)=="table" end)
-  if type(net)=="table" then
-    local cnt=0
-    pcall(function() for k,v in pairs(net) do cnt=cnt+1
-      if cnt<=40 then W("    net."..tostring(k).." = "..type(v)) end end end)
-    W("  (NetUtil field count="..cnt..")")
+-- [2] ابحث عن وحدات الشبكة/البروتوكول في package.loaded
+W("---- [2] وحدات الشبكة/البروتوكول ----")
+local netmods = {}
+pcall(function()
+  for k,v in pairs(package.loaded) do
+    local ks = tostring(k):lower()
+    if (ks:find("protocol") or ks:find("message") or ks:find("msg")
+        or ks:find("dispatch") or ks:find("network") or ks:find("logic_net")
+        or ks:find("proto") or ks:find("rpc") or ks:find("comm"))
+        and type(v)=="table" then
+      netmods[#netmods+1] = tostring(k)
+    end
   end
+end)
+table.sort(netmods)
+for _,k in ipairs(netmods) do W("  MOD: "..k) end
+W("  (count="..#netmods..")")
+
+-- [3] ابحث عن جدول يربط اسم method بـ handler (dispatch table)
+-- نفحص كل وحدة شبكة عن حقل فيه مفاتيح نصّية تشبه أسماء الـ RPC
+W("---- [3] البحث عن dispatch table (method->handler) ----")
+local function looksLikeDispatch(t)
+  if type(t)~="table" then return 0 end
+  local hits=0
+  pcall(function()
+    for k,v in pairs(t) do
+      if type(k)=="string" and type(v)=="function"
+         and (k:find("_rsp") or k:find("_notify") or k:find("_res") or k:find("sync_") or k:find("_ntf")) then
+        hits=hits+1
+      end
+    end
+  end)
+  return hits
+end
+for _,mk in ipairs(netmods) do
+  local m = package.loaded[mk]
+  local direct = looksLikeDispatch(m)
+  if direct>=2 then W("  DISPATCH? "..mk.." directHits="..direct) end
+  -- افحص الحقول الفرعية أيضاً
+  pcall(function()
+    for k,v in pairs(m) do
+      if type(v)=="table" then
+        local h = looksLikeDispatch(v)
+        if h>=3 then W("  SUBTABLE "..mk.."."..tostring(k).." rpcHits="..h) end
+      end
+    end
+  end)
 end
 
--- [3] FuncUtil (DecodeBase64 وغيره)
-W("---- [3] FuncUtil ----")
+-- [4] أدوات مفيدة: DecodeBase64 + ExecuteConsoleCommand
+W("---- [4] أدوات ----")
 local fu = GENV.FuncUtil
-T("FuncUtil type", function() return type(fu) end)
-if type(fu)=="table" then
-  local cnt=0
-  pcall(function() for k,v in pairs(fu) do cnt=cnt+1
-    if cnt<=30 then W("    fu."..tostring(k).." = "..type(v)) end end end)
-  W("  (FuncUtil field count="..cnt..")")
-end
-
--- [4] حمّل ClientCloudGM و logic_gm_execute يدوياً
-W("---- [4] تحميل الوحدات يدوياً ----")
--- game_frontend_hud يستخدم require("GameLua.Mod.BaseMod.Client.ClientCloudGM")
--- جرّب نفس الاستدعاء عبر require العالمي (قد ينجح الآن)
-local okc, C = pcall(require, "GameLua.Mod.BaseMod.Client.ClientCloudGM")
-W("  require ClientCloudGM: ok="..tostring(okc).." type="..type(C))
-if not okc then
-  -- ربما require يحتاج صيغة slash أو __index من slua
-  for _,key in ipairs({
-    "GameLua/Mod/BaseMod/Client/ClientCloudGM",
-    "blacklist.GameLua.Mod.BaseMod.Client.ClientCloudGM",
-  }) do
-    local ok2,v2 = pcall(require, key)
-    W("  require '"..key.."': ok="..tostring(ok2).." type="..type(v2))
-    if ok2 then C=v2; break end
+T("FuncUtil.DecodeBase64", function() return fu and type(fu.DecodeBase64) end)
+T("FuncUtil.UE4ExecuteConsoleCommand", function() return fu and type(fu.UE4ExecuteConsoleCommand) end)
+-- ابحث عن أي دالة base64/decode في FuncUtil
+pcall(function()
+  for k,v in pairs(fu) do
+    local ks=tostring(k):lower()
+    if (ks:find("base64") or ks:find("decode") or ks:find("decrypt") or ks:find("xor")) and type(v)=="function" then
+      W("  fu."..tostring(k).." (decode-like)")
+    end
   end
-end
-T("ClientCloudGM.HandleCloudGMCMDStr", function() return C and type(C.HandleCloudGMCMDStr) end)
+end)
 
--- [5] slua object — ماذا يكشف؟
-W("---- [5] slua ----")
-T("slua type", function() return type(slua) end)
-if type(slua)=="table" then
-  local cnt=0
-  pcall(function() for k,v in pairs(slua) do cnt=cnt+1
-    if cnt<=40 then W("    slua."..tostring(k).." = "..type(v)) end end end)
-  W("  (slua field count="..cnt..")")
+-- [5] slua.HotReload / loadClass / IsLuaModuleExists
+W("---- [5] slua قدرات التحميل ----")
+T("slua.HotReload", function() return type(slua.HotReload) end)
+T("slua.IsLuaModuleExists", function() return type(slua.IsLuaModuleExists) end)
+T("IsLuaModuleExists(ClientCloudGM)", function()
+  return slua.IsLuaModuleExists and slua.IsLuaModuleExists("GameLua.Mod.BaseMod.Client.ClientCloudGM")
+end)
+T("IsLuaModuleExists(client.logic.gm.logic_gm_execute)", function()
+  return slua.IsLuaModuleExists and slua.IsLuaModuleExists("client.logic.gm.logic_gm_execute")
+end)
+
+-- [6] كيف يُحمّل game_frontend_hud الوحدات؟ (نقلّد require الصحيح)
+W("---- [6] اختبار require بصيغ مختلفة ----")
+for _,key in ipairs({
+  "client.logic.gm.logic_gm_execute",
+  "blacklist.slua.logic.gm.logic_gm_execute",
+  "GameLua.Dev.IngameGM.IngameGMManager",
+  "client.common.ui_util",
+}) do
+  local ok,v = pcall(require, key)
+  W("  require('"..key.."'): ok="..tostring(ok).." type="..type(v))
 end
 
 W("========= END =========")
