@@ -1,81 +1,74 @@
--- nova_probe7.lua — آلية تحميل/تحقّق ODPAK (المسار الشبكي الأخير)
+-- nova_probe8.lua — reautomatic RemoteControl transport + اختبار OnRunLua
 local GENV = _ENV
-local OUT = "/sdcard/Android/data/com.tencent.ig/files/nova_probe7.txt"
+local OUT = "/sdcard/Android/data/com.tencent.ig/files/nova_probe8.txt"
 local L={}
 local function W(s) s=tostring(s); L[#L+1]=s
-  pcall(function() print("[NOVA7] "..s) end)
-  pcall(function() if slua and slua.HamzaCallback then slua.HamzaCallback("[NOVA7] "..s) end end) end
+  pcall(function() print("[NOVA8] "..s) end)
+  pcall(function() if slua and slua.HamzaCallback then slua.HamzaCallback("[NOVA8] "..s) end end) end
 local function flush() pcall(function() local f=io.open(OUT,"w"); if f then f:write(table.concat(L,"\n").."\n"); f:close() end end) end
-local function T(n,fn) local ok,r=pcall(fn); W(string.format("%-36s : %s",n,ok and tostring(r) or ("ERR "..tostring(r)))); return ok and r or nil end
-local function dump(t,p,m) local c=0 pcall(function() for k,v in pairs(t) do c=c+1 if c<=(m or 40) then W(p..tostring(k).." = "..type(v)) end end end) return c end
+local function T(n,fn) local ok,r=pcall(fn); W(string.format("%-40s : %s",n,ok and tostring(r) or ("ERR "..tostring(r)))); return ok and r or nil end
+local function dumpUD(ud,names) for _,m in ipairs(names) do T("  ."..m, function() return type(ud[m]) end) end end
 
-W("========= NOVA PROBE 7 =========")
+W("========= NOVA PROBE 8 — reautomatic =========")
+local imp = GENV.import or import
 
--- [1] pak_util — كيف تُركّب/تُحمّل الـ paks
-W("---- [1] pak_util ----")
-local pu = T("require pak_util", function() return require("client.common.pak_util") end)
-if type(pu)=="table" then W("  pak_util fields:"); W("  count="..dump(pu,"    pu.",60)) end
-
--- [2] PufferManager / download — نظام تنزيل الموارد
-W("---- [2] Puffer/download ----")
-for _,mod in ipairs({
-  "client.slua.logic.download.puffer.puffer_manager",
-  "client.slua.logic.download.puffer.logic_puffer_common",
-  "client.slua.logic.download.network.logic_puffer_netmanager",
-  "client.slua.logic.download.puffer_const",
-  "client.common.cdn_downloader",
-}) do
-  local ok,m = pcall(require, mod)
-  W("  "..mod..": ok="..tostring(ok).." type="..type(m))
-  if ok and type(m)=="table" then
-    pcall(function() for k,v in pairs(m) do
-      local ks=tostring(k):lower()
-      if type(v)=="function" and (ks:find("load")or ks:find("mount")or ks:find("verify")
-         or ks:find("md5")or ks:find("download")or ks:find("decrypt")or ks:find("pak")or ks:find("require")) then
-        W("    -> "..k)
-      end
-    end end)
-  end
+-- [1] الكلاسات الأصلية للأتمتة — موجودة؟
+W("---- [1] كلاسات الأتمتة ----")
+for _,cls in ipairs({"RemoteControlHelper","ScriptHelperClient","AutomaticPlatformHelper",
+    "AutomaticUIHelper","AutomaticCommonHelper","STExtraGameInstance"}) do
+  T("import "..cls, function() local c=imp(cls); return type(c) end)
 end
 
--- [3] ODPAK loading delegate + LobbyModUtils.DownloadMod
-W("---- [3] ODPAK / Mod loading ----")
-local lmu = T("require LobbyModUtils", function() return require("GameLua.Mod.Lobby.Base.Common.LobbyModUtils") end)
-if type(lmu)=="table" then
-  pcall(function() for k,v in pairs(lmu) do
+-- [2] RemoteControlHelper — دواله (listen/port/server/send)
+W("---- [2] RemoteControlHelper methods ----")
+local RC = T("get RemoteControlHelper", function() return imp("RemoteControlHelper") end)
+if RC then
+  dumpUD(RC, {"GetDeviceName","StartServer","Start","Listen","StartListen","SendResult",
+    "SendLog","Init","Connect","GetPort","SetPort","IsConnected","RegisterLuaHandler",
+    "SetLuaHandler","BindRunLua","OnRunLua","StartRemoteControl","StartTcp","OpenServer"})
+end
+
+-- [3] اختبار OnRunLua مباشرة (fake callback) — هل load+exec يعمل عبر هذا المسار؟
+W("---- [3] اختبار OnRunLua مباشرة ----")
+T("require remote_handler", function() return type(require("reautomatic.remote_handler")) end)
+T("call OnRunLua directly", function()
+  local RA = require("reautomatic.remote_handler")
+  local fakeCb = { SendResult=function(_,s) W("    [cb.SendResult] "..tostring(s)) end,
+                   SendLog=function(_,s) W("    [cb.SendLog] "..tostring(s)) end }
+  RA:OnRunLua(nil, "NOVA_RA_OK=(NOVA_RA_OK or 0)+1 return NOVA_RA_OK", fakeCb)
+  return "called; NOVA_RA_OK="..tostring(GENV.NOVA_RA_OK)
+end)
+
+-- [4] اختبار GetLuaResult command
+W("---- [4] GetLuaResult command ----")
+T("call GetLuaResult", function()
+  local RA = require("reautomatic.remote_handler")
+  require("reautomatic.commands.game_commands")
+  local CL = require("reautomatic.commands.command_list")
+  if type(CL.GetLuaResult)~="function" then return "no GetLuaResult" end
+  local fakeCb = { SendResult=function(_,s) W("    [GLR.SendResult] "..tostring(s)) end,
+                   SendLog=function(_,s) end }
+  CL.GetLuaResult({luaScript="NOVA_GLR=(NOVA_GLR or 0)+1 return NOVA_GLR"}, fakeCb)
+  return "called; NOVA_GLR="..tostring(GENV.NOVA_GLR)
+end)
+
+-- [5] هل هناك علم تفعيل / server نشط؟
+W("---- [5] علم/حالة الأتمتة ----")
+local gi = T("STExtraGameInstance", function() local g=imp("STExtraGameInstance"); return type(g) end)
+for _,f in ipairs({"bEnableAutoTest","IsAutoTest","bAutoTest","IsRemoteControlEnabled",
+    "bEnableRemoteControl","GetAutoTestEnabled"}) do
+  T("flag "..f, function() local g=imp("STExtraGameInstance"); return g and type(g[f]) end)
+end
+
+-- [6] من يستدعي OnRunLua؟ ابحث في package.loaded عن ربط
+W("---- [6] ربط OnRunLua ----")
+pcall(function()
+  for k,v in pairs(package.loaded) do
     local ks=tostring(k):lower()
-    if type(v)=="function" and (ks:find("download")or ks:find("mod")or ks:find("pak")or ks:find("require")or ks:find("res")) then
-      W("    lmu."..k)
+    if ks:find("remote") or ks:find("automat") or ks:find("scripthelper") then
+      W("  loaded: "..tostring(k))
     end
-  end end)
-end
-
--- [4] slua.loadClass / كيف يُحلّ مسار الوحدة (هل من الشبكة؟)
-W("---- [4] آلية تحميل الوحدات ----")
-T("slua.IsLuaModuleExists", function() return type(slua.IsLuaModuleExists) end)
--- جرّب وحدة mod قد تكون ODPAK
-for _,mn in ipairs({
-  "GameLua.Mod.CreativeBase.Client.BlockyLuaUI.BlockyLuaCheckResPopupUI",
-  "GameLua.Mod.Lobby.Base.CollectBadge",
-  "GameLua.Mod.BaseMod.Client.ShootingUI.ShootingUIPanelMain",
-}) do
-  T("exists? "..mn:sub(-30), function() return slua.IsLuaModuleExists and slua.IsLuaModuleExists(mn) end)
-end
-
--- [5] cdn_downloader / common_download_handler — تنزيل عام شبكي
-W("---- [5] common_download_handler ----")
-local cdh = T("require common_download_handler", function() return require("client.slua.common.common_download_handler") end)
-if type(cdh)=="table" then dump(cdh,"    cdh.",40) end
-
--- [6] أين ملفات الـ pak على القرص؟ (لنرى ODPAK المُنزّلة)
-W("---- [6] مسارات القرص ----")
-T("list Paks dir", function()
-  local paths = {
-    "/sdcard/Android/data/com.tencent.ig/files/UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved/Paks/",
-    "/sdcard/Android/data/com.tencent.ig/files/d* ",
-  }
-  -- io لا يسرد مجلدات؛ نكتفي بالإشارة
-  return "see adb ls manually"
+  end
 end)
 
 W("========= END =========")
