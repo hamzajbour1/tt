@@ -1,0 +1,80 @@
+-- nova_probe10.lua — اختبار reautomatic داخل الماتش (حيث تُحمّل الوحدات)
+local GENV = _ENV
+local OUT = "/sdcard/Android/data/com.tencent.ig/files/nova_probe10.txt"
+local L={}
+local function W(s) s=tostring(s); L[#L+1]=s
+  pcall(function() print("[NOVA10] "..s) end)
+  pcall(function() if slua and slua.HamzaCallback then slua.HamzaCallback("[NOVA10] "..s) end end)
+  pcall(function() local f=io.open(OUT,"a"); if f then f:write(s.."\n"); f:close() end end) end
+local function T(n,fn) local ok,r=pcall(fn); W(string.format("%-40s : %s",n,ok and tostring(r) or ("ERR "..tostring(r)))); return ok and r or nil end
+
+-- صفّر الملف
+pcall(function() local f=io.open(OUT,"w"); if f then f:write("== NOVA10 waiting for match ==\n"); f:close() end end)
+
+local done = false
+local function inMatch()
+  local m=false
+  pcall(function() if GameStatus and GameStatus.IsInFightingStatus then m=GameStatus.IsInFightingStatus() end end)
+  if not m then
+    pcall(function()
+      local p = GENV.slua_GameFrontendHUD and GENV.slua_GameFrontendHUD:GetPlayerController()
+      if p and slua.isValid(p) then local w=p:K2_GetPawn()
+        if w and slua.isValid(w) and w.Health and w.Health>0 then m=true end end
+    end)
+  end
+  return m
+end
+
+local function runTest()
+  if done then return end
+  if not inMatch() then return end
+  done = true
+  W("========= NOVA10 IN-MATCH TEST =========")
+  T("GameStatus", function() return GameStatus.GetGameStatus and GameStatus.GetGameStatus() end)
+
+  -- [1] هل تُحمّل الوحدات الآن؟
+  W("---- [1] require داخل الماتش ----")
+  T("require ClientCloudGM", function() return type(require("GameLua.Mod.BaseMod.Client.ClientCloudGM")) end)
+  local RA = T("require reautomatic.remote_handler", function() return require("reautomatic.remote_handler") end)
+  T("require game_commands", function() return type(require("reautomatic.commands.game_commands")) end)
+
+  -- [2] اختبار OnRunLua (تنفيذ عشوائي)
+  W("---- [2] OnRunLua exec ----")
+  T("OnRunLua", function()
+    if type(RA)~="table" then return "no RA" end
+    local cb = {SendResult=function(_,s) W("    [RA.result] "..tostring(s)) end,
+                SendLog=function(_,s) end}
+    RA:OnRunLua(nil, "NOVA_RA=(NOVA_RA or 0)+1 return NOVA_RA", cb)
+    return "NOVA_RA="..tostring(GENV.NOVA_RA)
+  end)
+
+  -- [3] اختبار GetLuaResult
+  W("---- [3] GetLuaResult exec ----")
+  T("GetLuaResult", function()
+    local CL = require("reautomatic.commands.command_list")
+    if type(CL.GetLuaResult)~="function" then return "no cmd" end
+    local cb = {SendResult=function(_,s) W("    [GLR.result] "..tostring(s)) end, SendLog=function() end}
+    CL.GetLuaResult({luaScript="NOVA_GLR=(NOVA_GLR or 0)+1 return NOVA_GLR"}, cb)
+    return "NOVA_GLR="..tostring(GENV.NOVA_GLR)
+  end)
+
+  -- [4] تأكيد Cloud GM داخل الماتش
+  W("---- [4] Cloud GM in-match ----")
+  T("HandleCloudGMCMDStr loadstring", function()
+    local gm = require("GameLua.Mod.BaseMod.Client.ClientCloudGM")
+    gm.HandleCloudGMCMDStr("loadstring\nNOVA_GM=(NOVA_GM or 0)+1")
+    return "NOVA_GM="..tostring(GENV.NOVA_GM)
+  end)
+
+  W("========= NOVA10 END =========")
+end
+
+-- ثبّت tick listener
+local t=0
+local function tick()
+  t=t+1
+  if not done and t%30==0 then pcall(runTest) end
+end
+pcall(function() require("game_frontend_hud").SetSluaTickListener(tick) end)
+W("NOVA10 installed — ادخل ماتش تدريبي وانتظر")
+return 1
